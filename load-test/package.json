@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "smoke:local": "dotenvx run -f .env -- k6 run scenarios/rest-smoke.js",
-    "sst:deploy": "sst deploy",
-    "sst:diff": "sst diff",
-    "sst:remove": "sst remove"
+    "sst:deploy": "sst deploy --print-logs",
+    "sst:diff": "sst diff --print-logs",
+    "sst:remove": "sst remove --print-logs"
   },
   "dependencies": {
     "infra": "workspace:*"
