@@ -253,11 +253,13 @@ jobs:
           fi
 
       - name: Notify Slack
-        if: always() && secrets.SLACK_LOAD_TEST_WEBHOOK_URL != ''
+        if: always() && env.SLACK_LOAD_TEST_WEBHOOK_URL != ''
         continue-on-error: true
+        env:
+          SLACK_LOAD_TEST_WEBHOOK_URL: ${{ secrets.SLACK_LOAD_TEST_WEBHOOK_URL }}
         uses: slackapi/slack-github-action@v2
         with:
-          webhook: ${{ secrets.SLACK_LOAD_TEST_WEBHOOK_URL }}
+          webhook: ${{ env.SLACK_LOAD_TEST_WEBHOOK_URL }}
           webhook-type: webhook-trigger
           payload: |
             scenario: "${{ inputs.scenario }}"
