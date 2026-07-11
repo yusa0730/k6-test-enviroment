@@ -1,0 +1,10 @@
+{
+  "name": "k6-test-environment",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.1",
+  "devDependencies": {
+    "knip": "^5.44.0",
+    "typescript": "^5.7.2"
+  }
+}

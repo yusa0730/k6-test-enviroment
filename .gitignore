@@ -1,0 +1,8 @@
+node_modules/
+.sst/
+.env
+*.env.local
+dist/
+.DS_Store
+sst-env.d.ts
+summary.json

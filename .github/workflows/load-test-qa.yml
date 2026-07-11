@@ -1,0 +1,267 @@
+name: Load Test (k6 on ECS Fargate)
+
+# k6負荷試験をECS Fargate上で実行し、結果をS3に残す。手動トリガー限定（workflow_dispatch）。
+# 実行には事前に GitHub Actions -> AWS への OIDC ロール（secrets.AWS_OIDC_ROLE_ARN）の
+# 設定が必要（IAM側でこのリポジトリを信頼するロールを作成しておくこと）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "実行するシナリオ名（load-test/scenarios/<name>.js）"
+        required: true
+        type: string
+        default: "rest-smoke"
+      stub_enabled:
+        description: "依存先呼び出しをスタブ（軽量エンドポイント）に切り替えるか"
+        required: true
+        type: boolean
+        default: false
+      rebuild_image:
+        description: "k6実行コンテナイメージを再ビルド・ECRプッシュするか（初回 or k6本体バージョン更新時のみtrue）"
+        required: true
+        type: boolean
+        default: false
+      infra_action:
+        description: "load-testインフラ(VPC/ECS/S3等)への操作。none以外はシナリオ実行を行わない。removeの前に必ずdiffで差分を確認すること"
+        required: true
+        type: choice
+        options:
+          - none
+          - diff
+          - deploy
+          - remove
+        default: none
+      confirm_remove:
+        description: 'infra_action=remove を実行する場合のみ "REMOVE" と入力（誤操作防止）'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  STAGE: qa
+  RESOURCE_PREFIX: k6env-load-test
+  CLUSTER_NAME: k6env-load-test-fargate-cluster-qa
+  TASK_DEFINITION_FAMILY: k6env-load-test-fargate-task-definition-qa
+  CONTAINER_NAME: k6env-load-test-fargate-k6-qa
+  ECR_REPOSITORY: k6env-load-test-repository-qa
+  BUCKET_NAME: k6env-load-test-bucket-qa
+  BASE_URL: https://httpbin.org
+
+jobs:
+  # infra_action=diff / remove の両方で使う差分確認。remove はこの内容を承認者が見た上で
+  # 実行されるよう、infra-remove から needs で参照する（承認前にログへ差分が残る）。
+  infra-diff:
+    if: inputs.infra_action == 'diff' || inputs.infra_action == 'remove'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: sst diff (load-test)
+        run: pnpm --filter load-test run sst:diff --stage qa
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+  infra-deploy:
+    if: inputs.infra_action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: sst deploy (load-test)
+        run: pnpm --filter load-test run sst:deploy --stage qa
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+  # infra-diff の結果（削除対象）を確認してから remove が実行されるようにするゲート。
+  # Settings > Environments で "load-test-remove" に Required reviewers を設定すると
+  # 承認されるまで本jobは Waiting のまま実行されない（未設定の場合は即実行される）。
+  infra-remove:
+    needs: infra-diff
+    if: always() && inputs.infra_action == 'remove' && needs.infra-diff.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: "load-test-remove"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: Guard remove confirmation
+        run: |
+          if [ "${{ inputs.confirm_remove }}" != "REMOVE" ]; then
+            echo "::error::infra_action=remove を実行するには confirm_remove に \"REMOVE\" と入力してください"
+            exit 1
+          fi
+
+      - name: sst remove (load-test)
+        run: pnpm --filter load-test run sst:remove --stage qa
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+  build-image:
+    needs: [infra-diff, infra-deploy, infra-remove]
+    if: |
+      always() &&
+      (needs.infra-diff.result == 'success' || needs.infra-diff.result == 'skipped') &&
+      (needs.infra-deploy.result == 'success' || needs.infra-deploy.result == 'skipped') &&
+      (needs.infra-remove.result == 'success' || needs.infra-remove.result == 'skipped') &&
+      inputs.rebuild_image &&
+      inputs.infra_action != 'remove' &&
+      inputs.infra_action != 'diff'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push k6 image
+        uses: docker/build-push-action@v6
+        with:
+          context: load-test/docker
+          push: true
+          tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-1.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+
+  run-load-test:
+    needs: [infra-diff, infra-deploy, infra-remove, build-image]
+    if: |
+      always() &&
+      (needs.infra-diff.result == 'success' || needs.infra-diff.result == 'skipped') &&
+      (needs.infra-deploy.result == 'success' || needs.infra-deploy.result == 'skipped') &&
+      (needs.infra-remove.result == 'success' || needs.infra-remove.result == 'skipped') &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped') &&
+      inputs.infra_action != 'remove' &&
+      inputs.infra_action != 'diff'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: Sync scenario files to S3
+        run: |
+          aws s3 sync load-test/scenarios/ "s3://${{ env.BUCKET_NAME }}/scenarios/" --delete
+
+      - name: Resolve network resources
+        id: network
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets \
+            --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-private-subnet-${{ env.STAGE }}" \
+            --query "Subnets[0].SubnetId" --output text)
+          SECURITY_GROUP_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-security-group-${{ env.STAGE }}" \
+            --query "SecurityGroups[0].GroupId" --output text)
+          echo "subnet_id=${SUBNET_ID}" >> "$GITHUB_OUTPUT"
+          echo "security_group_id=${SECURITY_GROUP_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Set test run id
+        id: run-id
+        run: echo "test_run_id=${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run k6 task on ECS Fargate
+        id: run-task
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${{ env.CLUSTER_NAME }}" \
+            --task-definition "${{ env.TASK_DEFINITION_FAMILY }}" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ steps.network.outputs.subnet_id }}],securityGroups=[${{ steps.network.outputs.security_group_id }}],assignPublicIp=DISABLED}" \
+            --overrides "$(jq -n \
+              --arg scenario "${{ inputs.scenario }}" \
+              --arg baseUrl "${{ env.BASE_URL }}" \
+              --arg testRunId "${{ steps.run-id.outputs.test_run_id }}" \
+              --arg stubEnabled "${{ inputs.stub_enabled }}" \
+              --arg containerName "${{ env.CONTAINER_NAME }}" \
+              '{containerOverrides: [{name: $containerName, environment: [
+                {name: "SCENARIO_NAME", value: $scenario},
+                {name: "BASE_URL", value: $baseUrl},
+                {name: "TEST_RUN_ID", value: $testRunId},
+                {name: "STUB_ENABLED", value: $stubEnabled}
+              ]}]}')" \
+            --query "tasks[0].taskArn" --output text)
+          echo "task_arn=${TASK_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for task completion
+        run: |
+          aws ecs wait tasks-stopped --cluster "${{ env.CLUSTER_NAME }}" --tasks "${{ steps.run-task.outputs.task_arn }}"
+
+      - name: Check task exit code
+        id: check-exit-code
+        run: |
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${{ env.CLUSTER_NAME }}" \
+            --tasks "${{ steps.run-task.outputs.task_arn }}" \
+            --query "tasks[0].containers[0].exitCode" --output text)
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          echo "results_url=s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/summary.json" >> "$GITHUB_OUTPUT"
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "::error::k6 task exited with code ${EXIT_CODE} (thresholds failed or execution error). Check CloudWatch Logs group /aws/ecs/service/${{ env.RESOURCE_PREFIX }}-fargate-${{ env.STAGE }}"
+            exit 1
+          fi
+
+      - name: Notify Slack
+        if: always() && secrets.SLACK_LOAD_TEST_WEBHOOK_URL != ''
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_LOAD_TEST_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          payload: |
+            scenario: "${{ inputs.scenario }}"
+            test_run_id: "${{ steps.run-id.outputs.test_run_id }}"
+            exit_code: "${{ steps.check-exit-code.outputs.exit_code }}"
+            results_url: "${{ steps.check-exit-code.outputs.results_url }}"
+            run_url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

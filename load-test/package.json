@@ -1,0 +1,18 @@
+{
+  "name": "load-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke:local": "dotenvx run -f .env -- k6 run scenarios/rest-smoke.js",
+    "sst:deploy": "sst deploy",
+    "sst:diff": "sst diff",
+    "sst:remove": "sst remove"
+  },
+  "dependencies": {
+    "infra": "workspace:*"
+  },
+  "devDependencies": {
+    "@dotenvx/dotenvx": "^1.39.0",
+    "sst": "^4.17.0"
+  }
+}
