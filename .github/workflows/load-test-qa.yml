@@ -83,13 +83,54 @@ jobs:
           DIFF_EXIT=${PIPESTATUS[0]}
           set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ inputs.infra_action }}" = "remove" ]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "⚠️ 上記の削除対象を確認してから、Actions画面で **Review deployments** から承認してください（\`load-test-remove\` environmentがRequired reviewer必須）。" >> "$GITHUB_STEP_SUMMARY"
-          fi
           exit $DIFF_EXIT
         env:
           SST_TELEMETRY_DISABLED: 1
+
+      # sst diff は「今デプロイし直したら何が変わるか」であり「removeで何が消えるか」ではない
+      # （コードと実デプロイ済み状態が一致していれば常に No changes になる）。
+      # remove前の承認判断には実際に現存するリソースの一覧が必要なため、別途調べて出す。
+      - name: Resource inventory before remove
+        if: inputs.infra_action == 'remove'
+        run: |
+          {
+            echo ""
+            echo "## 削除対象リソース一覧（現時点でAWS上に存在するもの）"
+            echo ""
+            echo "| リソース | 状態 |"
+            echo "|---|---|"
+
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}" --query "Vpcs[0].VpcId" --output text)
+            echo "| VPC (${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}) | ${VPC_ID} |"
+
+            NAT_ID=$(aws ec2 describe-nat-gateways --filter "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-nat-gateway-${{ env.STAGE }}" "Name=state,Values=available" --query "NatGateways[0].NatGatewayId" --output text)
+            echo "| NAT Gateway | ${NAT_ID} |"
+
+            CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "${{ env.CLUSTER_NAME }}" --query "clusters[0].status" --output text 2>/dev/null || echo "None")
+            echo "| ECS Cluster (${{ env.CLUSTER_NAME }}) | ${CLUSTER_STATUS} |"
+
+            BUCKET_EXISTS=$(aws s3api head-bucket --bucket "${{ env.BUCKET_NAME }}" 2>/dev/null && echo "exists" || echo "None")
+            SCENARIO_COUNT=$(aws s3 ls "s3://${{ env.BUCKET_NAME }}/scenarios/" 2>/dev/null | wc -l | tr -d ' ')
+            RESULT_COUNT=$(aws s3 ls "s3://${{ env.BUCKET_NAME }}/results/" --recursive 2>/dev/null | wc -l | tr -d ' ')
+            echo "| S3 Bucket (${{ env.BUCKET_NAME }}) | ${BUCKET_EXISTS}（scenarios: ${SCENARIO_COUNT}件 / results: ${RESULT_COUNT}件） |"
+
+            IMAGE_COUNT=$(aws ecr list-images --repository-name "${{ env.ECR_REPOSITORY }}" --query "length(imageIds)" --output text 2>/dev/null || echo "None")
+            echo "| ECR Repository (${{ env.ECR_REPOSITORY }}) | イメージ ${IMAGE_COUNT}件 |"
+
+            for ROLE in "${{ env.RESOURCE_PREFIX }}-task-role-${{ env.STAGE }}" "${{ env.RESOURCE_PREFIX }}-task-execution-role-${{ env.STAGE }}"; do
+              ROLE_EXISTS=$(aws iam get-role --role-name "$ROLE" --query "Role.RoleName" --output text 2>/dev/null || echo "None")
+              echo "| IAM Role ($ROLE) | ${ROLE_EXISTS} |"
+            done
+
+            TOKEN_PARAM=$(aws ssm get-parameter --name "/k6env/load-test/${{ env.STAGE }}/load-test-token" --query "Parameter.Name" --output text 2>/dev/null || echo "None")
+            echo "| SSM Parameter (/k6env/load-test/${{ env.STAGE }}/load-test-token) | ${TOKEN_PARAM} |"
+
+            LOG_GROUP=$(aws logs describe-log-groups --log-group-name-prefix "/aws/ecs/service/${{ env.RESOURCE_PREFIX }}-fargate-${{ env.STAGE }}" --query "logGroups[0].logGroupName" --output text 2>/dev/null || echo "None")
+            echo "| CloudWatch Log Group | ${LOG_GROUP} |"
+
+            echo ""
+            echo "⚠️ 上記が \`sst remove\` で削除される。問題なければ Actions画面の **Review deployments** から承認する（\`load-test-remove\` environmentがRequired reviewer必須）。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   infra-deploy:
     if: inputs.infra_action == 'deploy'
