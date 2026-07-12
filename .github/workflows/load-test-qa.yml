@@ -75,7 +75,19 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
       - name: sst diff (load-test)
-        run: pnpm --filter load-test run sst:diff --stage qa
+        run: |
+          echo "## sst diff --stage qa" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          pnpm --filter load-test run sst:diff --stage qa 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          DIFF_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.infra_action }}" = "remove" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ 上記の削除対象を確認してから、Actions画面で **Review deployments** から承認してください（\`load-test-remove\` environmentがRequired reviewer必須）。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $DIFF_EXIT
         env:
           SST_TELEMETRY_DISABLED: 1
 
@@ -103,9 +115,9 @@ jobs:
         env:
           SST_TELEMETRY_DISABLED: 1
 
-  # infra-diff の結果（削除対象）を確認してから remove が実行されるようにするゲート。
-  # Settings > Environments で "load-test-remove" に Required reviewers を設定すると
-  # 承認されるまで本jobは Waiting のまま実行されない（未設定の場合は即実行される）。
+  # infra-diff の結果（削除対象、Step Summaryに出力）を確認してから remove が実行されるゲート。
+  # "load-test-remove" environment に Required reviewers を設定済みのため、infra-diff完了後
+  # 本jobは Waiting となり、Actions画面の Review deployments から承認するまで実行されない。
   infra-remove:
     needs: infra-diff
     if: always() && inputs.infra_action == 'remove' && needs.infra-diff.result == 'success'

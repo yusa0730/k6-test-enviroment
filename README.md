@@ -108,6 +108,17 @@ pnpm run sst:remove   # 削除（課金停止）
 
 結果は `s3://k6env-load-test-bucket-qa/results/<test_run_id>/summary.json` に保存される。CloudWatch Logsは `/aws/ecs/service/k6env-load-test-fargate-qa` を参照する。
 
+### `infra_action=remove` の承認フロー
+
+削除は誤操作の影響が大きいため、diffで削除対象を確認してから人が承認しないと実行されないようにしている。
+
+1. `infra-diff` ジョブが `sst diff` を実行し、削除対象をワークフロー実行画面の **Summary** に表示する
+2. `infra-remove` ジョブは `load-test-remove` という GitHub Environment に紐づいており、この environment には Required reviewer（リポジトリ管理者）が設定済みのため、diff完了後は **Waiting** 状態で止まる
+3. Actions実行画面の **Review deployments** から Summary の diff 内容を確認し、問題なければ承認する
+4. 承認後に初めて `sst remove` が実行される
+
+Required reviewerの設定は一度だけ行えばよい（`gh api --method PUT repos/<owner>/<repo>/environments/load-test-remove` に `reviewers` を指定）。別リポジトリに移植する場合は改めて設定が必要。
+
 ### GitHub Actionsを動かすための事前設定（初回のみ）
 
 このリポジトリでは以下がAWS側に設定済み。別リポジトリに移植する場合は同様の設定が必要。
