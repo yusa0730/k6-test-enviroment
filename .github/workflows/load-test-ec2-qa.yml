@@ -1,0 +1,293 @@
+name: Load Test EC2 (k6 on EC2)
+
+# k6負荷試験をEC2インスタンス上で実行し、結果をS3に残す。手動トリガー限定（workflow_dispatch）。
+# ECS版 (.github/workflows/load-test-qa.yml) と役割は同じだが、コンピュートにECS Fargateではなく
+# EC2インスタンス（run-instancesでオンデマンド起動・自己終了）を使う版。
+# 実行には事前に GitHub Actions -> AWS への OIDC ロール（secrets.AWS_OIDC_ROLE_ARN、ECS版と共用）の
+# 設定が必要。
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "実行するシナリオ名（load-test/scenarios/<name>.js。ECS版と同じシナリオを共有）"
+        required: true
+        type: string
+        default: "rest-smoke"
+      stub_enabled:
+        description: "依存先呼び出しをスタブ（軽量エンドポイント）に切り替えるか"
+        required: true
+        type: boolean
+        default: false
+      infra_action:
+        description: "load-test-ec2インフラ(VPC/EC2/S3等)への操作。none以外はシナリオ実行を行わない。removeの前に必ずdiffで差分を確認すること"
+        required: true
+        type: choice
+        options:
+          - none
+          - diff
+          - deploy
+          - remove
+        default: none
+      confirm_remove:
+        description: 'infra_action=remove を実行する場合のみ "REMOVE" と入力（誤操作防止）'
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  STAGE: qa
+  RESOURCE_PREFIX: k6env-load-test-ec2
+  LAUNCH_TEMPLATE_NAME: k6env-load-test-ec2-launch-template-qa
+  BUCKET_NAME: k6env-load-test-ec2-bucket-qa
+  BASE_URL: https://httpbin.org
+  K6_VERSION: "1.3.0"
+
+jobs:
+  infra-diff:
+    if: inputs.infra_action == 'diff' || inputs.infra_action == 'remove'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: sst diff (load-test-ec2)
+        run: |
+          echo "## sst diff --stage qa" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          pnpm --filter load-test-ec2 run sst:diff --stage qa 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          DIFF_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $DIFF_EXIT
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+      # sst diff は「今デプロイし直したら何が変わるか」であり「removeで何が消えるか」ではない。
+      # remove前の承認判断には実際に現存するリソースの一覧が必要なため、別途調べて出す。
+      - name: Resource inventory before remove
+        if: inputs.infra_action == 'remove'
+        run: |
+          {
+            echo ""
+            echo "## 削除対象リソース一覧（現時点でAWS上に存在するもの）"
+            echo ""
+            echo "| リソース | 状態 |"
+            echo "|---|---|"
+
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}" --query "Vpcs[0].VpcId" --output text)
+            echo "| VPC (${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}) | ${VPC_ID} |"
+
+            EIP=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-eip-${{ env.STAGE }}" --query "Addresses[0].PublicIp" --output text)
+            echo "| Elastic IP | ${EIP} |"
+
+            RUNNING=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-instance-${{ env.STAGE }}" "Name=instance-state-name,Values=pending,running" --query "length(Reservations[].Instances[])" --output text)
+            echo "| 実行中インスタンス | ${RUNNING}台 |"
+
+            LT_ID=$(aws ec2 describe-launch-templates --launch-template-names "${{ env.LAUNCH_TEMPLATE_NAME }}" --query "LaunchTemplates[0].LaunchTemplateId" --output text 2>/dev/null || echo "None")
+            echo "| Launch Template (${{ env.LAUNCH_TEMPLATE_NAME }}) | ${LT_ID} |"
+
+            BUCKET_EXISTS=$(aws s3api head-bucket --bucket "${{ env.BUCKET_NAME }}" 2>/dev/null && echo "exists" || echo "None")
+            RESULT_COUNT=$(aws s3 ls "s3://${{ env.BUCKET_NAME }}/results/" --recursive 2>/dev/null | wc -l | tr -d ' ')
+            echo "| S3 Bucket (${{ env.BUCKET_NAME }}) | ${BUCKET_EXISTS}（results: ${RESULT_COUNT}件） |"
+
+            ROLE_EXISTS=$(aws iam get-role --role-name "${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}" --query "Role.RoleName" --output text 2>/dev/null || echo "None")
+            echo "| IAM Role (${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}) | ${ROLE_EXISTS} |"
+
+            TOKEN_PARAM=$(aws ssm get-parameter --name "/k6env/load-test/ec2/${{ env.STAGE }}/load-test-token" --query "Parameter.Name" --output text 2>/dev/null || echo "None")
+            echo "| SSM Parameter (/k6env/load-test/ec2/${{ env.STAGE }}/load-test-token) | ${TOKEN_PARAM} |"
+
+            echo ""
+            echo "⚠️ 上記が \`sst remove\` で削除される。問題なければ Actions画面の **Review deployments** から承認する（\`load-test-ec2-remove\` environmentがRequired reviewer必須）。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  infra-deploy:
+    if: inputs.infra_action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: sst deploy (load-test-ec2)
+        run: pnpm --filter load-test-ec2 run sst:deploy --stage qa
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+  # infra-diff の結果（削除対象、Step Summaryに出力）を確認してから remove が実行されるゲート。
+  # "load-test-ec2-remove" environment に Required reviewers を設定済みのため、infra-diff完了後
+  # 本jobは Waiting となり、Actions画面の Review deployments から承認するまで実行されない。
+  infra-remove:
+    needs: infra-diff
+    if: always() && inputs.infra_action == 'remove' && needs.infra-diff.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: "load-test-ec2-remove"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: Guard remove confirmation
+        run: |
+          if [ "${{ inputs.confirm_remove }}" != "REMOVE" ]; then
+            echo "::error::infra_action=remove を実行するには confirm_remove に \"REMOVE\" と入力してください"
+            exit 1
+          fi
+
+      - name: sst remove (load-test-ec2)
+        run: pnpm --filter load-test-ec2 run sst:remove --stage qa
+        env:
+          SST_TELEMETRY_DISABLED: 1
+
+  run-load-test:
+    needs: [infra-diff, infra-deploy, infra-remove]
+    if: |
+      always() &&
+      (needs.infra-diff.result == 'success' || needs.infra-diff.result == 'skipped') &&
+      (needs.infra-deploy.result == 'success' || needs.infra-deploy.result == 'skipped') &&
+      (needs.infra-remove.result == 'success' || needs.infra-remove.result == 'skipped') &&
+      inputs.infra_action != 'remove' &&
+      inputs.infra_action != 'diff'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+      - name: Sync scenario files to S3
+        run: |
+          aws s3 sync load-test/scenarios/ "s3://${{ env.BUCKET_NAME }}/scenarios/" --delete
+
+      - name: Resolve network / launch template resources
+        id: resources
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets \
+            --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-public-subnet-${{ env.STAGE }}" \
+            --query "Subnets[0].SubnetId" --output text)
+          SECURITY_GROUP_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-security-group-${{ env.STAGE }}" \
+            --query "SecurityGroups[0].GroupId" --output text)
+          EIP_ALLOCATION_ID=$(aws ec2 describe-addresses \
+            --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-eip-${{ env.STAGE }}" \
+            --query "Addresses[0].AllocationId" --output text)
+          echo "subnet_id=${SUBNET_ID}" >> "$GITHUB_OUTPUT"
+          echo "security_group_id=${SECURITY_GROUP_ID}" >> "$GITHUB_OUTPUT"
+          echo "eip_allocation_id=${EIP_ALLOCATION_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Set test run id
+        id: run-id
+        run: echo "test_run_id=${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build user-data
+        id: user-data
+        run: |
+          sed \
+            -e "s|__AWS_REGION__|ap-northeast-1|g" \
+            -e "s|__RESULTS_BUCKET_NAME__|${{ env.BUCKET_NAME }}|g" \
+            -e "s|__SSM_PARAMETER_PREFIX__|/k6env/load-test/ec2/${{ env.STAGE }}|g" \
+            -e "s|__BASE_URL__|${{ env.BASE_URL }}|g" \
+            -e "s|__ORIGIN__|${{ env.BASE_URL }}|g" \
+            -e "s|__SCENARIO_NAME__|${{ inputs.scenario }}|g" \
+            -e "s|__STUB_ENABLED__|${{ inputs.stub_enabled }}|g" \
+            -e "s|__TEST_RUN_ID__|${{ steps.run-id.outputs.test_run_id }}|g" \
+            -e "s|__K6_VERSION__|${{ env.K6_VERSION }}|g" \
+            load-test-ec2/user-data.sh > /tmp/user-data.sh
+
+      - name: Run k6 instance on EC2
+        id: run-instance
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template "LaunchTemplateName=${{ env.LAUNCH_TEMPLATE_NAME }},Version=\$Latest" \
+            --subnet-id "${{ steps.resources.outputs.subnet_id }}" \
+            --security-group-ids "${{ steps.resources.outputs.security_group_id }}" \
+            --user-data file:///tmp/user-data.sh \
+            --count 1 \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.RESOURCE_PREFIX }}-instance-${{ env.STAGE }}},{Key=TestRunId,Value=${{ steps.run-id.outputs.test_run_id }}}]" \
+            --query "Instances[0].InstanceId" --output text)
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+          echo "[load-test-ec2] launched instance ${INSTANCE_ID}"
+
+      - name: Associate Elastic IP (fixed source IP)
+        run: |
+          aws ec2 wait instance-running --instance-ids "${{ steps.run-instance.outputs.instance_id }}"
+          aws ec2 associate-address \
+            --instance-id "${{ steps.run-instance.outputs.instance_id }}" \
+            --allocation-id "${{ steps.resources.outputs.eip_allocation_id }}"
+
+      - name: Wait for instance termination
+        run: |
+          aws ec2 wait instance-terminated --instance-ids "${{ steps.run-instance.outputs.instance_id }}"
+
+      - name: Check k6 exit code
+        id: check-exit-code
+        run: |
+          EXIT_CODE=$(aws s3 cp "s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/exit_code" - 2>/dev/null || echo "")
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          echo "results_url=s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/summary.json" >> "$GITHUB_OUTPUT"
+          if [ -z "${EXIT_CODE}" ]; then
+            echo "::error::exit_code が見つからない（インスタンス起動処理自体が失敗した可能性）。s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/user-data.log を確認すること"
+            exit 1
+          fi
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "::error::k6 task exited with code ${EXIT_CODE} (thresholds failed or execution error). s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/user-data.log を確認すること"
+            exit 1
+          fi
+
+      - name: Notify Slack
+        if: always() && env.SLACK_LOAD_TEST_WEBHOOK_URL != ''
+        continue-on-error: true
+        env:
+          SLACK_LOAD_TEST_WEBHOOK_URL: ${{ secrets.SLACK_LOAD_TEST_WEBHOOK_URL }}
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ env.SLACK_LOAD_TEST_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          payload: |
+            scenario: "${{ inputs.scenario }} (EC2)"
+            test_run_id: "${{ steps.run-id.outputs.test_run_id }}"
+            exit_code: "${{ steps.check-exit-code.outputs.exit_code }}"
+            results_url: "${{ steps.check-exit-code.outputs.results_url }}"
+            run_url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

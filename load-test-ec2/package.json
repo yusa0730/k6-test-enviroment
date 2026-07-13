@@ -1,0 +1,16 @@
+{
+  "name": "load-test-ec2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sst:deploy": "sst deploy --print-logs",
+    "sst:diff": "sst diff --print-logs",
+    "sst:remove": "sst remove --print-logs"
+  },
+  "dependencies": {
+    "infra": "workspace:*"
+  },
+  "devDependencies": {
+    "sst": "^4.17.0"
+  }
+}

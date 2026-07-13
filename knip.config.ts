@@ -9,6 +9,11 @@ const config: KnipConfig = {
       ignoreBinaries: ["k6"],
       ignoreDependencies: ["sst", "k6"],
     },
+    "load-test-ec2": {
+      // user-data.sh はGitHub Actionsがsedで置換してrun-instancesに渡すだけで、TS/JSから
+      // importされないため entry として明示する。
+      entry: ["user-data.sh", "sst.config.ts"],
+    },
     infra: {
       entry: ["src/**/*.ts"],
     },

@@ -1,3 +1,4 @@
 packages:
   - infra
   - load-test
+  - load-test-ec2
