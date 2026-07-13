@@ -241,8 +241,6 @@ jobs:
         run: |
           INSTANCE_ID=$(aws ec2 run-instances \
             --launch-template "LaunchTemplateName=${{ env.LAUNCH_TEMPLATE_NAME }},Version=\$Latest" \
-            --subnet-id "${{ steps.resources.outputs.subnet_id }}" \
-            --security-group-ids "${{ steps.resources.outputs.security_group_id }}" \
             --user-data file:///tmp/user-data.sh \
             --count 1 \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.RESOURCE_PREFIX }}-instance-${{ env.STAGE }}},{Key=TestRunId,Value=${{ steps.run-id.outputs.test_run_id }}}]" \
