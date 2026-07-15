@@ -32,6 +32,10 @@ export const loadTestEc2Stack = async (): Promise<
   // ECS版と衝突しないよう /k6env/load-test/ec2/ 配下に置く
   const ssmParameterPrefix = `/${RESOURCE_ID_PREFIX}/load-test/ec2/${stage}`;
 
+  const awsAccountId = await aws
+    .getCallerIdentity({})
+    .then((id) => id.accountId);
+
   const network = createLoadTestEc2Network(stage);
   if (network.isErr()) {
     return err(network.error);
@@ -47,6 +51,7 @@ export const loadTestEc2Stack = async (): Promise<
     stage,
     bucket.value.bucket.arn,
     `${ssmParameterPrefix}/*`,
+    awsAccountId,
   );
   if (instanceRole.isErr()) {
     return err(instanceRole.error);

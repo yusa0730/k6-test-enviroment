@@ -54,6 +54,7 @@ export const loadTestStack = async (): Promise<
     stage,
     bucket.value.bucket.arn,
     `${ssmParameterPrefix}/*`,
+    awsAccountId,
   );
   if (taskRole.isErr()) {
     return err(taskRole.error);
