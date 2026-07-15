@@ -18,8 +18,27 @@ echo "[load-test-ec2] run_id=${TEST_RUN_ID} scenario=${SCENARIO_NAME} ssm_prefix
 
 # 0. k6/jqをインストール（起動のたびに使い捨てのため毎回必要。aws-cliはAmazon Linux 2023に標準搭載）
 dnf install -y jq
-curl -sSL "https://github.com/grafana/k6/releases/download/v${K6_VERSION}/k6-v${K6_VERSION}-linux-amd64.tar.gz" \
-  | tar xz -C /tmp
+
+# k6本体は一旦ファイルに保存し、grafana/k6が同じリリースで配布しているchecksums.txtと
+# 突き合わせてから展開する（ダウンロード時の破損・改ざんの検知。認証情報を扱うインスタンスで
+# 素性を確認しないまま任意バイナリを実行するのは避ける）。
+K6_TARBALL="k6-v${K6_VERSION}-linux-amd64.tar.gz"
+K6_RELEASE_URL="https://github.com/grafana/k6/releases/download/v${K6_VERSION}"
+curl -sSL "${K6_RELEASE_URL}/${K6_TARBALL}" -o "/tmp/${K6_TARBALL}"
+curl -sSL "${K6_RELEASE_URL}/k6-v${K6_VERSION}-checksums.txt" -o /tmp/k6-checksums.txt
+
+EXPECTED_SHA256=$(grep "  ${K6_TARBALL}\$" /tmp/k6-checksums.txt | awk '{print $1}')
+if [ -z "${EXPECTED_SHA256}" ]; then
+  echo "[load-test-ec2] ${K6_TARBALL} のchecksumがk6-v${K6_VERSION}-checksums.txtに見つかりません" >&2
+  exit 1
+fi
+ACTUAL_SHA256=$(sha256sum "/tmp/${K6_TARBALL}" | awk '{print $1}')
+if [ "${EXPECTED_SHA256}" != "${ACTUAL_SHA256}" ]; then
+  echo "[load-test-ec2] k6バイナリのchecksumが一致しません（改ざん・破損の可能性）。expected=${EXPECTED_SHA256} actual=${ACTUAL_SHA256}" >&2
+  exit 1
+fi
+
+tar xzf "/tmp/${K6_TARBALL}" -C /tmp
 mv "/tmp/k6-v${K6_VERSION}-linux-amd64/k6" /usr/local/bin/k6
 chmod +x /usr/local/bin/k6
 

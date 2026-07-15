@@ -42,6 +42,13 @@ permissions:
   id-token: write
   contents: read
 
+# 同一の単一VPC/NAT Gateway/S3バケットを共有するため、同時実行を許可すると
+# インフラ操作とテスト実行が競合しうる。キューイングして直列化する
+# （実行中のインフラ変更やテストを取り消したくないため cancel-in-progress は false）。
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   STAGE: qa
   RESOURCE_PREFIX: k6env-load-test
@@ -182,8 +189,14 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
       - name: Guard remove confirmation
+        # inputs.confirm_remove は自由入力のためscript injection対策が必要。
+        # ${{ }} を run: に直接埋め込むとGitHub Actionsが実行前に文字列置換するため、
+        # REMOVE$(...) のような値でコマンド置換が実行されてしまう。env: 経由で
+        # シェル変数として受け取り、"$VAR" 参照にすることでこれを防ぐ。
+        env:
+          CONFIRM_REMOVE: ${{ inputs.confirm_remove }}
         run: |
-          if [ "${{ inputs.confirm_remove }}" != "REMOVE" ]; then
+          if [ "${CONFIRM_REMOVE}" != "REMOVE" ]; then
             echo "::error::infra_action=remove を実行するには confirm_remove に \"REMOVE\" と入力してください"
             exit 1
           fi
@@ -257,6 +270,11 @@ jobs:
           SECURITY_GROUP_ID=$(aws ec2 describe-security-groups \
             --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-security-group-${{ env.STAGE }}" \
             --query "SecurityGroups[0].GroupId" --output text)
+          if [ -z "${SUBNET_ID}" ] || [ "${SUBNET_ID}" = "None" ] || \
+             [ -z "${SECURITY_GROUP_ID}" ] || [ "${SECURITY_GROUP_ID}" = "None" ]; then
+            echo "::error::VPC/subnet/security groupが見つかりません。infra_action=deploy を先に実行してください"
+            exit 1
+          fi
           echo "subnet_id=${SUBNET_ID}" >> "$GITHUB_OUTPUT"
           echo "security_group_id=${SECURITY_GROUP_ID}" >> "$GITHUB_OUTPUT"
 
@@ -266,6 +284,12 @@ jobs:
 
       - name: Run k6 task on ECS Fargate
         id: run-task
+        # inputs.scenario / inputs.stub_enabled は自由入力のためscript injection対策が必要。
+        # jqの --arg 自体はshell injectionを防がないため(値は"${{ }}"経由でこのrun:スクリプトの
+        # 文字列に直接埋め込まれる)、env: 経由でシェル変数として受け取ってから参照する。
+        env:
+          SCENARIO_INPUT: ${{ inputs.scenario }}
+          STUB_ENABLED_INPUT: ${{ inputs.stub_enabled }}
         run: |
           TASK_ARN=$(aws ecs run-task \
             --cluster "${{ env.CLUSTER_NAME }}" \
@@ -273,10 +297,10 @@ jobs:
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[${{ steps.network.outputs.subnet_id }}],securityGroups=[${{ steps.network.outputs.security_group_id }}],assignPublicIp=DISABLED}" \
             --overrides "$(jq -n \
-              --arg scenario "${{ inputs.scenario }}" \
+              --arg scenario "${SCENARIO_INPUT}" \
               --arg baseUrl "${{ env.BASE_URL }}" \
               --arg testRunId "${{ steps.run-id.outputs.test_run_id }}" \
-              --arg stubEnabled "${{ inputs.stub_enabled }}" \
+              --arg stubEnabled "${STUB_ENABLED_INPUT}" \
               --arg containerName "${{ env.CONTAINER_NAME }}" \
               '{containerOverrides: [{name: $containerName, environment: [
                 {name: "SCENARIO_NAME", value: $scenario},

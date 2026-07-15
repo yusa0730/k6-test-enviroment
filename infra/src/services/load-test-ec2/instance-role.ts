@@ -23,6 +23,7 @@ export type LoadTestEc2InstanceRoleResources = {
  * @param stage - デプロイステージ
  * @param bucketArn - シナリオ同期・結果アップロード用S3バケットのARN
  * @param ssmParameterPrefix - 負荷試験用トークンを格納するSSM Parameterのパスprefix
+ * @param accountId - SSM ARNをこのアカウントに限定するためのAWSアカウントID
  *
  * @remarks
  * 権限:
@@ -40,6 +41,7 @@ export const createLoadTestEc2InstanceRole = (
   stage: string,
   bucketArn: $util.Output<string>,
   ssmParameterPrefix: string,
+  accountId: string,
 ): Result<LoadTestEc2InstanceRoleResources, InfraError> => {
   const idPrefix = `${prefix}-instance`;
 
@@ -84,7 +86,9 @@ export const createLoadTestEc2InstanceRole = (
               {
                 Effect: "Allow",
                 Action: ["ssm:GetParameter", "ssm:GetParameters"],
-                Resource: [`arn:aws:ssm:*:*:parameter${ssmParameterPrefix}`],
+                Resource: [
+                  `arn:aws:ssm:*:${accountId}:parameter${ssmParameterPrefix}`,
+                ],
               },
             ],
           }),
