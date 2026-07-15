@@ -19,9 +19,13 @@ echo "[load-test-ec2] run_id=${TEST_RUN_ID} scenario=${SCENARIO_NAME} ssm_prefix
 # インスタンス起動直後はEIPのassociateがまだ完了していない場合があり、その間は
 # S3/SSM/インターネットへの到達性が無い。呼び出し元のuser-data.shと同じ理由で、
 # ネットワークに依存する操作はリトライする。
+# RETRY_MAX_ATTEMPTS/RETRY_DELAY で呼び出し側から回数・間隔を上書きできる
+# （呼び出し先コマンド自体には必ず --connect-timeout 等の短いタイムアウトを
+# 指定すること。指定しないと「持続的な到達不能」時に1回の失敗判定だけで
+# 数十秒〜数分かかり、想定した合計待ち時間の見積りが崩れる）。
 retry() {
-  local max_attempts=20
-  local delay=3
+  local max_attempts="${RETRY_MAX_ATTEMPTS:-20}"
+  local delay="${RETRY_DELAY:-3}"
   local attempt=1
   until "$@"; do
     if [ "${attempt}" -ge "${max_attempts}" ]; then
@@ -40,8 +44,8 @@ retry() {
 # 素性を確認しないまま任意バイナリを実行するのは避ける）。
 K6_TARBALL="k6-v${K6_VERSION}-linux-amd64.tar.gz"
 K6_RELEASE_URL="https://github.com/grafana/k6/releases/download/v${K6_VERSION}"
-retry curl -sSL "${K6_RELEASE_URL}/${K6_TARBALL}" -o "/tmp/${K6_TARBALL}"
-retry curl -sSL "${K6_RELEASE_URL}/k6-v${K6_VERSION}-checksums.txt" -o /tmp/k6-checksums.txt
+retry curl -sSL --connect-timeout 5 --max-time 30 "${K6_RELEASE_URL}/${K6_TARBALL}" -o "/tmp/${K6_TARBALL}"
+retry curl -sSL --connect-timeout 5 --max-time 30 "${K6_RELEASE_URL}/k6-v${K6_VERSION}-checksums.txt" -o /tmp/k6-checksums.txt
 
 EXPECTED_SHA256=$(grep "  ${K6_TARBALL}\$" /tmp/k6-checksums.txt | awk '{print $1}')
 if [ -z "${EXPECTED_SHA256}" ]; then
@@ -62,23 +66,18 @@ WORK_DIR=$(mktemp -d)
 cd "${WORK_DIR}"
 
 # 1. シナリオファイルをS3から取得（正はGit。GitHub ActionsがJobの中で同期している）
-retry aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scenarios/${SCENARIO_NAME}.js" ./scenario.js
+retry aws s3 cp --cli-connect-timeout 5 --cli-read-timeout 15 \
+  "s3://${RESULTS_BUCKET_NAME}/scenarios/${SCENARIO_NAME}.js" ./scenario.js
 
 # 2. SSM Parameter Store から対象URL・認証情報を取得（値はログに出さない）
 # 対象URL自体もリポジトリ・ワークフローには一切書かず、ここで初めて取得する。
 # この時点までにk6ダウンロード・シナリオ取得でネットワーク到達性は既に確認できているはずなので、
-# パラメータ未設定などの恒久的なエラーで無駄に待たされないよう、リトライ回数は短めにする。
+# パラメータ未設定などの恒久的なエラーで無駄に待たされないよう、上のretry()をリトライ回数だけ
+# 上書きして再利用する（別実装は持たない）。
 ssm_get() {
-  local max_attempts=5
-  local delay=2
-  local attempt=1
-  until aws ssm get-parameter --name "${SSM_PARAMETER_PREFIX}/$1" --with-decryption --query "Parameter.Value" --output text; do
-    if [ "${attempt}" -ge "${max_attempts}" ]; then
-      return 1
-    fi
-    sleep "${delay}"
-    attempt=$((attempt + 1))
-  done
+  RETRY_MAX_ATTEMPTS=5 RETRY_DELAY=2 retry aws ssm get-parameter \
+    --cli-connect-timeout 5 --cli-read-timeout 15 \
+    --name "${SSM_PARAMETER_PREFIX}/$1" --with-decryption --query "Parameter.Value" --output text
 }
 
 BASE_URL=$(ssm_get "base-url" 2>/dev/null || echo "")

@@ -285,8 +285,21 @@ jobs:
             --allocation-id "${{ steps.resources.outputs.eip_allocation_id }}"
 
       - name: Wait for instance termination
+        # aws ec2 wait instance-terminated は15秒間隔×40回(=約10分)で固定されており、
+        # --delay/--max-attempts のような調整用オプションが無い。一方インスタンス側
+        # (user-data.sh/run-load-test.sh)のリトライは接続タイムアウトを含めると
+        # 最悪ケースで10分を超えうるため、単発のwaitだと本来のk6実行結果を見る前に
+        # ワーカー側の都合でジョブが失敗しうる。waiterを複数回呼び直すことで
+        # 実質的な待機時間を延ばす。
         run: |
-          aws ec2 wait instance-terminated --instance-ids "${{ steps.run-instance.outputs.instance_id }}"
+          for i in 1 2 3; do
+            if aws ec2 wait instance-terminated --instance-ids "${{ steps.run-instance.outputs.instance_id }}"; then
+              exit 0
+            fi
+            echo "[load-test-ec2] instance-terminated wait timed out (attempt ${i}/3), retrying wait..."
+          done
+          echo "::error::30分待ってもインスタンスが終了しませんでした。EC2コンソールでインスタンス ${{ steps.run-instance.outputs.instance_id }} の状態を確認すること"
+          exit 1
 
       - name: Check k6 exit code
         id: check-exit-code

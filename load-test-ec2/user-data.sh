@@ -43,9 +43,13 @@ trap cleanup EXIT
 # run-instances の後にassociate-addressを呼ぶため）、public subnetでも一時的に
 # 外部到達性が無い瞬間がありうる。ここで失敗するとcloud-init全体が落ちてしまうため、
 # EIP付与を待つ間はリトライして通信可能になるのを待つ。
+# RETRY_MAX_ATTEMPTS/RETRY_DELAY で呼び出し側から回数・間隔を上書きできる
+# （呼び出し先コマンド自体には必ず --cli-connect-timeout 等の短いタイムアウトを
+# 指定すること。指定しないと「持続的な到達不能」時に1回の失敗判定だけで
+# 数十秒〜数分かかり、想定した合計待ち時間の見積りが崩れる）。
 retry() {
-  local max_attempts=20
-  local delay=3
+  local max_attempts="${RETRY_MAX_ATTEMPTS:-20}"
+  local delay="${RETRY_DELAY:-3}"
   local attempt=1
   until "$@"; do
     if [ "${attempt}" -ge "${max_attempts}" ]; then
@@ -59,7 +63,8 @@ retry() {
 }
 
 # run-load-test.sh をS3から取得（正はGit。GitHub ActionsがJobの中で同期している）
-retry aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scripts/run-load-test.sh" /tmp/run-load-test.sh
+retry aws s3 cp --cli-connect-timeout 5 --cli-read-timeout 15 \
+  "s3://${RESULTS_BUCKET_NAME}/scripts/run-load-test.sh" /tmp/run-load-test.sh
 chmod +x /tmp/run-load-test.sh
 
 set +e
