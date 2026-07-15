@@ -12,7 +12,7 @@
 # 送ってからインスタンスを終了させる」ことだけ。実際のk6実行ロジックはrun-load-test.sh側。
 
 exec > /var/log/load-test-user-data.log 2>&1
-set -u
+set -euo pipefail
 
 RESULTS_BUCKET_NAME="__RESULTS_BUCKET_NAME__"
 SSM_PARAMETER_PREFIX="__SSM_PARAMETER_PREFIX__"
@@ -39,8 +39,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# インスタンス起動直後はEIPのassociateがまだ完了しておらず（GitHub Actions側が
+# run-instances の後にassociate-addressを呼ぶため）、public subnetでも一時的に
+# 外部到達性が無い瞬間がありうる。ここで失敗するとcloud-init全体が落ちてしまうため、
+# EIP付与を待つ間はリトライして通信可能になるのを待つ。
+retry() {
+  local max_attempts=20
+  local delay=3
+  local attempt=1
+  until "$@"; do
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      echo "[load-test-ec2] command failed after ${attempt} attempts: $*" >&2
+      return 1
+    fi
+    echo "[load-test-ec2] retrying ($((attempt + 1))/${max_attempts}) in ${delay}s: $*" >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+  done
+}
+
 # run-load-test.sh をS3から取得（正はGit。GitHub ActionsがJobの中で同期している）
-aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scripts/run-load-test.sh" /tmp/run-load-test.sh
+retry aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scripts/run-load-test.sh" /tmp/run-load-test.sh
 chmod +x /tmp/run-load-test.sh
 
 set +e

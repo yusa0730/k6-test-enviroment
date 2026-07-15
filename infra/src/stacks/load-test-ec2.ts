@@ -69,7 +69,7 @@ export const loadTestEc2Stack = async (): Promise<
   // 対象URL・SSOログイン情報・SAMLセッションCookie等の実値はコードに一切書かない。
   // instanceRole は ${ssmParameterPrefix}/* への読み取り権限だけを持ち、実際の
   // パラメータ（base-url / origin / sso-login-id / sso-login-password / auth-token）は
-  // `aws ssm put-parameter` で運用者が別途登録する（README/RUNBOOK参照）。
+  // `aws ssm put-parameter` で運用者が別途登録する（README.mdのEC2版セクション参照）。
 
   return ok({
     launchTemplateId: launchTemplate.value.launchTemplate.id,

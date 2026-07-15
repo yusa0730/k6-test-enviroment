@@ -48,8 +48,10 @@ env:
   LAUNCH_TEMPLATE_NAME: k6env-load-test-ec2-launch-template-qa
   BUCKET_NAME: k6env-load-test-ec2-bucket-qa
   # 対象URL・認証情報はここには置かない。実行時にEC2上のrun-load-test.shが
-  # このパス配下をSSM Parameter Storeから直接取得する（README/RUNBOOK参照）。
-  SSM_PARAMETER_PREFIX: /k6env/load-test/ec2/qa
+  # このパス配下をSSM Parameter Storeから直接取得する（README.mdのEC2版セクション参照）。
+  # STAGE と別の文字列として持つと将来STAGEを変更した際に静かにズレるため、
+  # 固定のprefix部分だけをここに置き、STAGEと組み合わせて使う箇所で都度連結する。
+  SSM_PARAMETER_PREFIX_BASE: /k6env/load-test/ec2
 
 jobs:
   infra-diff:
@@ -118,7 +120,7 @@ jobs:
             echo ""
             echo "⚠️ 上記が \`sst remove\` で削除される。問題なければ Actions画面の **Review deployments** から承認する（\`load-test-ec2-remove\` environmentがRequired reviewer必須）。"
             echo ""
-            echo "ℹ️ \`${{ env.SSM_PARAMETER_PREFIX }}/*\` のSSMパラメータ（base-url/origin/sso-login-id/sso-login-password/auth-token）は"
+            echo "ℹ️ \`${{ env.SSM_PARAMETER_PREFIX_BASE }}/${{ env.STAGE }}/*\` のSSMパラメータ（base-url/origin/sso-login-id/sso-login-password/auth-token）は"
             echo "\`aws ssm put-parameter\` で別途登録した運用者管理のリソースであり、sstのstate外のため \`sst remove\` では削除されない。"
             echo "不要になった場合は \`aws ssm delete-parameter\` で別途消すこと。"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -252,7 +254,7 @@ jobs:
           TEST_RUN_ID_INPUT: ${{ steps.run-id.outputs.test_run_id }}
         run: |
           RESULTS_BUCKET_NAME_ESCAPED=$(printf '%q' "${{ env.BUCKET_NAME }}")
-          SSM_PARAMETER_PREFIX_ESCAPED=$(printf '%q' "${{ env.SSM_PARAMETER_PREFIX }}")
+          SSM_PARAMETER_PREFIX_ESCAPED=$(printf '%q' "${{ env.SSM_PARAMETER_PREFIX_BASE }}/${{ env.STAGE }}")
           SCENARIO_NAME_ESCAPED=$(printf '%q' "${SCENARIO_INPUT}")
           TEST_RUN_ID_ESCAPED=$(printf '%q' "${TEST_RUN_ID_INPUT}")
 
