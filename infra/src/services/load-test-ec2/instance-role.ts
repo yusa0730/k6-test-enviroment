@@ -26,10 +26,11 @@ export type LoadTestEc2InstanceRoleResources = {
  *
  * @remarks
  * 権限:
- * - S3: scenarios/* の読み取り、results/* への書き込み（結果JSON・実行ログ・exit_codeファイル）
- * - SSM: 負荷試験用トークンの取得（読み取り専用、対象パス配下に限定）
- * - SSM Session Manager: AL2023はSSM Agentがプリインストールされているため、この権限だけで
- *   ポート開放無しにSession Manager接続でデバッグできる（ECS Execに相当）
+ * - `AmazonSSMManagedInstanceCore`（managed policy）: SSM Session Manager接続に必須。
+ *   inbound不要でコマンド実行・ポートフォワードできるのはこの権限による（ECS Execに相当）
+ * - S3: `scenarios/`・`scripts/` の読み取り、`results/*` への書き込み（結果JSON・実行ログ・exit_codeファイル）
+ * - SSM: 対象URL・SSOログイン情報・SAMLセッションCookie等の取得（読み取り専用、対象パス配下に限定。
+ *   実際の値はコードには一切書かず、`aws ssm put-parameter` で別途登録する）
  *
  * インスタンスの自己終了は `ec2:TerminateInstances` 権限を使わず、OS側の `shutdown -h now` +
  * launch templateの `InstanceInitiatedShutdownBehavior: terminate` で行うため、その権限は含めない。
@@ -48,6 +49,9 @@ export const createLoadTestEc2InstanceRole = (
       assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
         Service: "ec2.amazonaws.com",
       }),
+      managedPolicyArns: [
+        "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+      ],
       inlinePolicies: [
         {
           name: `${idPrefix}-role-policy-${stage}`,
@@ -59,13 +63,18 @@ export const createLoadTestEc2InstanceRole = (
                 Action: ["s3:ListBucket"],
                 Resource: [$interpolate`${bucketArn}`],
                 Condition: {
-                  StringLike: { "s3:prefix": ["scenarios/*", "results/*"] },
+                  StringLike: {
+                    "s3:prefix": ["scenarios/*", "scripts/*", "results/*"],
+                  },
                 },
               },
               {
                 Effect: "Allow",
                 Action: ["s3:GetObject"],
-                Resource: [$interpolate`${bucketArn}/scenarios/*`],
+                Resource: [
+                  $interpolate`${bucketArn}/scenarios/*`,
+                  $interpolate`${bucketArn}/scripts/*`,
+                ],
               },
               {
                 Effect: "Allow",
@@ -76,19 +85,6 @@ export const createLoadTestEc2InstanceRole = (
                 Effect: "Allow",
                 Action: ["ssm:GetParameter", "ssm:GetParameters"],
                 Resource: [`arn:aws:ssm:*:*:parameter${ssmParameterPrefix}`],
-              },
-              {
-                Effect: "Allow",
-                Action: [
-                  "ssmmessages:CreateControlChannel",
-                  "ssmmessages:CreateDataChannel",
-                  "ssmmessages:OpenControlChannel",
-                  "ssmmessages:OpenDataChannel",
-                  "ec2messages:GetMessages",
-                  "ec2messages:AcknowledgeMessage",
-                  "ssm:UpdateInstanceInformation",
-                ],
-                Resource: ["*"],
               },
             ],
           }),

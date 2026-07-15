@@ -13,12 +13,7 @@ on:
         description: "実行するシナリオ名（load-test/scenarios/<name>.js。ECS版と同じシナリオを共有）"
         required: true
         type: string
-        default: "rest-smoke"
-      stub_enabled:
-        description: "依存先呼び出しをスタブ（軽量エンドポイント）に切り替えるか"
-        required: true
-        type: boolean
-        default: false
+        default: "smoke-rest"
       infra_action:
         description: "load-test-ec2インフラ(VPC/EC2/S3等)への操作。none以外はシナリオ実行を行わない。removeの前に必ずdiffで差分を確認すること"
         required: true
@@ -44,8 +39,9 @@ env:
   RESOURCE_PREFIX: k6env-load-test-ec2
   LAUNCH_TEMPLATE_NAME: k6env-load-test-ec2-launch-template-qa
   BUCKET_NAME: k6env-load-test-ec2-bucket-qa
-  BASE_URL: https://httpbin.org
-  K6_VERSION: "1.3.0"
+  # 対象URL・認証情報はここには置かない。実行時にEC2上のrun-load-test.shが
+  # このパス配下をSSM Parameter Storeから直接取得する（README/RUNBOOK参照）。
+  SSM_PARAMETER_PREFIX: /k6env/load-test/ec2/qa
 
 jobs:
   infra-diff:
@@ -111,11 +107,12 @@ jobs:
             ROLE_EXISTS=$(aws iam get-role --role-name "${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}" --query "Role.RoleName" --output text 2>/dev/null || echo "None")
             echo "| IAM Role (${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}) | ${ROLE_EXISTS} |"
 
-            TOKEN_PARAM=$(aws ssm get-parameter --name "/k6env/load-test/ec2/${{ env.STAGE }}/load-test-token" --query "Parameter.Name" --output text 2>/dev/null || echo "None")
-            echo "| SSM Parameter (/k6env/load-test/ec2/${{ env.STAGE }}/load-test-token) | ${TOKEN_PARAM} |"
-
             echo ""
             echo "⚠️ 上記が \`sst remove\` で削除される。問題なければ Actions画面の **Review deployments** から承認する（\`load-test-ec2-remove\` environmentがRequired reviewer必須）。"
+            echo ""
+            echo "ℹ️ \`${{ env.SSM_PARAMETER_PREFIX }}/*\` のSSMパラメータ（base-url/origin/sso-login-id/sso-login-password/auth-token）は"
+            echo "\`aws ssm put-parameter\` で別途登録した運用者管理のリソースであり、sstのstate外のため \`sst remove\` では削除されない。"
+            echo "不要になった場合は \`aws ssm delete-parameter\` で別途消すこと。"
           } >> "$GITHUB_STEP_SUMMARY"
 
   infra-deploy:
@@ -197,9 +194,10 @@ jobs:
           aws-region: ap-northeast-1
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
-      - name: Sync scenario files to S3
+      - name: Sync scenario / script files to S3
         run: |
           aws s3 sync load-test/scenarios/ "s3://${{ env.BUCKET_NAME }}/scenarios/" --delete
+          aws s3 sync load-test-ec2/scripts/ "s3://${{ env.BUCKET_NAME }}/scripts/" --delete
 
       - name: Resolve network / launch template resources
         id: resources
@@ -223,17 +221,26 @@ jobs:
 
       - name: Build user-data
         id: user-data
+        # scenario 等のworkflow入力を run: の文字列に直接埋め込まず、必ず env: 経由で
+        # シェル変数として受け取る（GitHub Actionsのscript injection対策の標準パターン）。
+        # printf '%q' でシェル的に安全な形にエスケープしてから埋め込むことで、値に
+        # " や $(...) 等が含まれていてもコマンドとして再解釈されない。
+        # ここで扱うのはバケット名・SSMのパス名・シナリオ名・実行IDのみで、
+        # 対象URL・認証情報は一切含まない（run-load-test.sh が実行時にSSMから直接取得する）。
+        env:
+          SCENARIO_INPUT: ${{ inputs.scenario }}
+          TEST_RUN_ID_INPUT: ${{ steps.run-id.outputs.test_run_id }}
         run: |
+          RESULTS_BUCKET_NAME_ESCAPED=$(printf '%q' "${{ env.BUCKET_NAME }}")
+          SSM_PARAMETER_PREFIX_ESCAPED=$(printf '%q' "${{ env.SSM_PARAMETER_PREFIX }}")
+          SCENARIO_NAME_ESCAPED=$(printf '%q' "${SCENARIO_INPUT}")
+          TEST_RUN_ID_ESCAPED=$(printf '%q' "${TEST_RUN_ID_INPUT}")
+
           sed \
-            -e "s|__AWS_REGION__|ap-northeast-1|g" \
-            -e "s|__RESULTS_BUCKET_NAME__|${{ env.BUCKET_NAME }}|g" \
-            -e "s|__SSM_PARAMETER_PREFIX__|/k6env/load-test/ec2/${{ env.STAGE }}|g" \
-            -e "s|__BASE_URL__|${{ env.BASE_URL }}|g" \
-            -e "s|__ORIGIN__|${{ env.BASE_URL }}|g" \
-            -e "s|__SCENARIO_NAME__|${{ inputs.scenario }}|g" \
-            -e "s|__STUB_ENABLED__|${{ inputs.stub_enabled }}|g" \
-            -e "s|__TEST_RUN_ID__|${{ steps.run-id.outputs.test_run_id }}|g" \
-            -e "s|__K6_VERSION__|${{ env.K6_VERSION }}|g" \
+            -e "s|__RESULTS_BUCKET_NAME__|${RESULTS_BUCKET_NAME_ESCAPED}|g" \
+            -e "s|__SSM_PARAMETER_PREFIX__|${SSM_PARAMETER_PREFIX_ESCAPED}|g" \
+            -e "s|__SCENARIO_NAME__|${SCENARIO_NAME_ESCAPED}|g" \
+            -e "s|__TEST_RUN_ID__|${TEST_RUN_ID_ESCAPED}|g" \
             load-test-ec2/user-data.sh > /tmp/user-data.sh
 
       - name: Run k6 instance on EC2

@@ -21,7 +21,7 @@ export type LoadTestEc2StackResult = {
   securityGroupId: $util.Output<string>;
   bucketName: $util.Output<string>;
   eipAllocationId: $util.Output<string>;
-  tokenParameterName: $util.Output<string>;
+  ssmParameterPrefix: string;
 };
 
 export const loadTestEc2Stack = async (): Promise<
@@ -61,17 +61,10 @@ export const loadTestEc2Stack = async (): Promise<
     return err(launchTemplate.error);
   }
 
-  // 負荷試験用トークン。ECS版と同様、httpbin.org の /headers に付けて
-  // 「SSMから取得した資格情報を使う」構成パターンを再現するための検証用の値。
-  const tokenParameter = new aws.ssm.Parameter(
-    `${prefix}-token-parameter-${stage}`,
-    {
-      name: `${ssmParameterPrefix}/load-test-token`,
-      type: "SecureString",
-      value: "k6-load-test-ec2-demo-token",
-      tags: { Name: `${prefix}-token-parameter-${stage}` },
-    },
-  );
+  // 対象URL・SSOログイン情報・SAMLセッションCookie等の実値はコードに一切書かない。
+  // instanceRole は ${ssmParameterPrefix}/* への読み取り権限だけを持ち、実際の
+  // パラメータ（base-url / origin / sso-login-id / sso-login-password / auth-token）は
+  // `aws ssm put-parameter` で運用者が別途登録する（README/RUNBOOK参照）。
 
   return ok({
     launchTemplateId: launchTemplate.value.launchTemplate.id,
@@ -79,6 +72,6 @@ export const loadTestEc2Stack = async (): Promise<
     securityGroupId: network.value.securityGroup.id,
     bucketName: bucket.value.bucket.name,
     eipAllocationId: network.value.eip.id,
-    tokenParameterName: tokenParameter.name,
+    ssmParameterPrefix,
   });
 };

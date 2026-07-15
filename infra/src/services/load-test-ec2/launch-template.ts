@@ -18,7 +18,7 @@ export type LoadTestEc2LaunchTemplateResources = {
  *
  * @remarks
  * - AMIはAmazon Linux 2023の最新版をSSM Public Parameterから解決する（固定AMI IDをコードに書かない）
- * - instanceType は 5〜10 VU の軽量スモーク向けに t3.micro（2 vCPU busrtable / 1 GiB）
+ * - instanceType は 5〜10 VU の軽量スモーク向けに t3.small（2 vCPU burstable / 2 GiB）
  * - InstanceInitiatedShutdownBehavior: terminate にすることで、user-data内の `shutdown -h now` が
  *   そのままインスタンス終了（課金停止）になる。ec2:TerminateInstances権限をインスタンス自身に
  *   持たせる必要がない
@@ -46,7 +46,7 @@ export const createLoadTestEc2LaunchTemplate = (
       {
         name: `${idPrefix}-launch-template-${stage}`,
         imageId: ami.value,
-        instanceType: "t3.micro",
+        instanceType: "t3.small",
         iamInstanceProfile: {
           name: ec2.instanceProfileName,
         },

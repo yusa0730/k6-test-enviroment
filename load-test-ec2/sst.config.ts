@@ -27,7 +27,7 @@ export default $config({
         securityGroupId: result.value.securityGroupId,
         bucketName: result.value.bucketName,
         eipAllocationId: result.value.eipAllocationId,
-        tokenParameterName: result.value.tokenParameterName,
+        ssmParameterPrefix: result.value.ssmParameterPrefix,
       };
     } catch (error) {
       console.error(error);
