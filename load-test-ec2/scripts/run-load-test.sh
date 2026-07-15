@@ -16,16 +16,32 @@ K6_VERSION="1.3.0"
 
 echo "[load-test-ec2] run_id=${TEST_RUN_ID} scenario=${SCENARIO_NAME} ssm_prefix=${SSM_PARAMETER_PREFIX}"
 
-# 0. k6/jqをインストール（起動のたびに使い捨てのため毎回必要。aws-cliはAmazon Linux 2023に標準搭載）
-dnf install -y jq
+# インスタンス起動直後はEIPのassociateがまだ完了していない場合があり、その間は
+# S3/SSM/インターネットへの到達性が無い。呼び出し元のuser-data.shと同じ理由で、
+# ネットワークに依存する操作はリトライする。
+retry() {
+  local max_attempts=20
+  local delay=3
+  local attempt=1
+  until "$@"; do
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      echo "[load-test-ec2] command failed after ${attempt} attempts: $*" >&2
+      return 1
+    fi
+    echo "[load-test-ec2] retrying ($((attempt + 1))/${max_attempts}) in ${delay}s: $*" >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+  done
+}
 
-# k6本体は一旦ファイルに保存し、grafana/k6が同じリリースで配布しているchecksums.txtと
+# 0. k6本体をダウンロード（起動のたびに使い捨てのため毎回必要。aws-cliはAmazon Linux 2023に標準搭載）
+# 一旦ファイルに保存し、grafana/k6が同じリリースで配布しているchecksums.txtと
 # 突き合わせてから展開する（ダウンロード時の破損・改ざんの検知。認証情報を扱うインスタンスで
 # 素性を確認しないまま任意バイナリを実行するのは避ける）。
 K6_TARBALL="k6-v${K6_VERSION}-linux-amd64.tar.gz"
 K6_RELEASE_URL="https://github.com/grafana/k6/releases/download/v${K6_VERSION}"
-curl -sSL "${K6_RELEASE_URL}/${K6_TARBALL}" -o "/tmp/${K6_TARBALL}"
-curl -sSL "${K6_RELEASE_URL}/k6-v${K6_VERSION}-checksums.txt" -o /tmp/k6-checksums.txt
+retry curl -sSL "${K6_RELEASE_URL}/${K6_TARBALL}" -o "/tmp/${K6_TARBALL}"
+retry curl -sSL "${K6_RELEASE_URL}/k6-v${K6_VERSION}-checksums.txt" -o /tmp/k6-checksums.txt
 
 EXPECTED_SHA256=$(grep "  ${K6_TARBALL}\$" /tmp/k6-checksums.txt | awk '{print $1}')
 if [ -z "${EXPECTED_SHA256}" ]; then
@@ -46,15 +62,26 @@ WORK_DIR=$(mktemp -d)
 cd "${WORK_DIR}"
 
 # 1. シナリオファイルをS3から取得（正はGit。GitHub ActionsがJobの中で同期している）
-aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scenarios/${SCENARIO_NAME}.js" ./scenario.js
+retry aws s3 cp "s3://${RESULTS_BUCKET_NAME}/scenarios/${SCENARIO_NAME}.js" ./scenario.js
 
 # 2. SSM Parameter Store から対象URL・認証情報を取得（値はログに出さない）
 # 対象URL自体もリポジトリ・ワークフローには一切書かず、ここで初めて取得する。
+# この時点までにk6ダウンロード・シナリオ取得でネットワーク到達性は既に確認できているはずなので、
+# パラメータ未設定などの恒久的なエラーで無駄に待たされないよう、リトライ回数は短めにする。
 ssm_get() {
-  aws ssm get-parameter --name "${SSM_PARAMETER_PREFIX}/$1" --with-decryption --query "Parameter.Value" --output text
+  local max_attempts=5
+  local delay=2
+  local attempt=1
+  until aws ssm get-parameter --name "${SSM_PARAMETER_PREFIX}/$1" --with-decryption --query "Parameter.Value" --output text; do
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      return 1
+    fi
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+  done
 }
 
-BASE_URL=$(ssm_get "base-url")
+BASE_URL=$(ssm_get "base-url" 2>/dev/null || echo "")
 ORIGIN=$(ssm_get "origin" 2>/dev/null || echo "${BASE_URL}")
 SSO_LOGIN_ID=$(ssm_get "sso-login-id" 2>/dev/null || echo "")
 SSO_LOGIN_PASSWORD=$(ssm_get "sso-login-password" 2>/dev/null || echo "")
