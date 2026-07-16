@@ -63,10 +63,10 @@ export const createLoadTestEc2LaunchTemplate = (
         tagSpecifications: [
           {
             resourceType: "instance",
-            tags: { Name: `${idPrefix}-instance-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+            tags: { Name: `${idPrefix}-instance-${stage}` },
           },
         ],
-        tags: { Name: `${idPrefix}-launch-template-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+        tags: { Name: `${idPrefix}-launch-template-${stage}` },
       },
     );
 

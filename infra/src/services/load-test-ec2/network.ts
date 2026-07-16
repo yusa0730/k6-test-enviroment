@@ -40,14 +40,14 @@ export const createLoadTestEc2Network = (
       cidrBlock: "10.101.0.0/16",
       enableDnsHostnames: true,
       enableDnsSupport: true,
-      tags: { Name: `${prefix}-vpc-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+      tags: { Name: `${prefix}-vpc-${stage}` },
     });
 
     const internetGateway = new aws.ec2.InternetGateway(
       `${prefix}-internet-gateway-${stage}`,
       {
         vpcId: vpc.id,
-        tags: { Name: `${prefix}-internet-gateway-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+        tags: { Name: `${prefix}-internet-gateway-${stage}` },
       },
     );
 
@@ -58,7 +58,7 @@ export const createLoadTestEc2Network = (
         cidrBlock: "10.101.0.0/24",
         availabilityZone,
         mapPublicIpOnLaunch: false,
-        tags: { Name: `${prefix}-public-subnet-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+        tags: { Name: `${prefix}-public-subnet-${stage}` },
       },
     );
 
@@ -66,7 +66,7 @@ export const createLoadTestEc2Network = (
       `${prefix}-public-route-table-${stage}`,
       {
         vpcId: vpc.id,
-        tags: { Name: `${prefix}-public-route-table-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+        tags: { Name: `${prefix}-public-route-table-${stage}` },
       },
     );
 
@@ -88,7 +88,7 @@ export const createLoadTestEc2Network = (
     // 実行のたびにGitHub Actions側で run-instances 直後に associate-address する。
     const eip = new aws.ec2.Eip(`${prefix}-eip-${stage}`, {
       domain: "vpc",
-      tags: { Name: `${prefix}-eip-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+      tags: { Name: `${prefix}-eip-${stage}` },
     });
 
     // security group（ingress不要、egressのみ許可。SSM Session Managerもoutbound HTTPSのみで動く）
@@ -105,7 +105,7 @@ export const createLoadTestEc2Network = (
             cidrBlocks: ["0.0.0.0/0"],
           },
         ],
-        tags: { Name: `${prefix}-security-group-${stage}`, ManagedBy: "k6env-load-test-ec2" },
+        tags: { Name: `${prefix}-security-group-${stage}` },
       },
     );
 
