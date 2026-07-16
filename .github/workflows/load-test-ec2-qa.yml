@@ -304,15 +304,29 @@ jobs:
       - name: Check k6 exit code
         id: check-exit-code
         run: |
-          EXIT_CODE=$(aws s3 cp "s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/exit_code" - 2>/dev/null || echo "")
+          TEST_RUN_ID="${{ steps.run-id.outputs.test_run_id }}"
+          SUMMARY_URL="s3://${{ env.BUCKET_NAME }}/results/${TEST_RUN_ID}/summary.json"
+          LOG_URL="s3://${{ env.BUCKET_NAME }}/results/${TEST_RUN_ID}/user-data.log"
+          EXIT_CODE=$(aws s3 cp "s3://${{ env.BUCKET_NAME }}/results/${TEST_RUN_ID}/exit_code" - 2>/dev/null || echo "")
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
-          echo "results_url=s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/summary.json" >> "$GITHUB_OUTPUT"
+          echo "results_url=${SUMMARY_URL}" >> "$GITHUB_OUTPUT"
+
+          # 成功・失敗どちらでも、結果の場所を必ずSummaryに残す
+          # （GitHub Actionsの GITHUB_OUTPUT はログ画面には表示されないため）
+          {
+            echo "## 実行結果"
+            echo "- test_run_id: \`${TEST_RUN_ID}\`"
+            echo "- exit_code: \`${EXIT_CODE:-（見つかりません）}\`"
+            echo "- 結果: \`${SUMMARY_URL}\`"
+            echo "- ログ: \`${LOG_URL}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
           if [ -z "${EXIT_CODE}" ]; then
-            echo "::error::exit_code が見つからない（インスタンス起動処理自体が失敗した可能性）。s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/user-data.log を確認すること"
+            echo "::error::exit_code が見つからない（インスタンス起動処理自体が失敗した可能性）。${LOG_URL} を確認すること"
             exit 1
           fi
           if [ "${EXIT_CODE}" != "0" ]; then
-            echo "::error::k6 task exited with code ${EXIT_CODE} (thresholds failed or execution error). s3://${{ env.BUCKET_NAME }}/results/${{ steps.run-id.outputs.test_run_id }}/user-data.log を確認すること"
+            echo "::error::k6 task exited with code ${EXIT_CODE} (thresholds failed or execution error). ${LOG_URL} を確認すること"
             exit 1
           fi
 
