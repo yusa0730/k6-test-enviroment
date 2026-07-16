@@ -60,13 +60,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # sst diff は「今デプロイし直したら何が変わるか」の確認用で、removeの判断には使わない
+      # （下のResource inventoryが実際の削除対象を見せる）。infra_action=removeのときは
+      # pnpm install等の準備も含めて丸ごとスキップし、removeフローを速くする。
+      - if: inputs.infra_action == 'diff'
+        uses: pnpm/action-setup@v4
+      - if: inputs.infra_action == 'diff'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - if: inputs.infra_action == 'diff'
+        run: pnpm install --frozen-lockfile
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -74,6 +80,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
       - name: sst diff (load-test-ec2)
+        if: inputs.infra_action == 'diff'
         run: |
           echo "## sst diff --stage qa" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
