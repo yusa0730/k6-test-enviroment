@@ -60,13 +60,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # sst diff は「今デプロイし直したら何が変わるか」の確認用で、removeの判断には使わない
+      # （下のResource inventoryが実際の削除対象を見せる）。infra_action=removeのときは
+      # pnpm install等の準備も含めて丸ごとスキップし、removeフローを速くする。
+      - if: inputs.infra_action == 'diff'
+        uses: pnpm/action-setup@v4
+      - if: inputs.infra_action == 'diff'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - if: inputs.infra_action == 'diff'
+        run: pnpm install --frozen-lockfile
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -74,6 +80,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
       - name: sst diff (load-test-ec2)
+        if: inputs.infra_action == 'diff'
         run: |
           echo "## sst diff --stage qa" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -88,6 +95,10 @@ jobs:
 
       # sst diff は「今デプロイし直したら何が変わるか」であり「removeで何が消えるか」ではない。
       # remove前の承認判断には実際に現存するリソースの一覧が必要なため、別途調べて出す。
+      # 個々のリソースを名前で1つずつ問い合わせる方式だと、新しいリソースを追加した際に
+      # チェックの追記を忘れて漏れる（実際に発生した）。全リソースに付けた共通タグ
+      # (ManagedBy=k6env-load-test-ec2) を Resource Groups Tagging API で一括検索する
+      # ことで、リソースの種類を事前に知らなくても網羅的に一覧化できるようにする。
       - name: Resource inventory before remove
         if: inputs.infra_action == 'remove'
         run: |
@@ -95,27 +106,31 @@ jobs:
             echo ""
             echo "## 削除対象リソース一覧（現時点でAWS上に存在するもの）"
             echo ""
-            echo "| リソース | 状態 |"
-            echo "|---|---|"
 
-            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}" --query "Vpcs[0].VpcId" --output text)
-            echo "| VPC (${{ env.RESOURCE_PREFIX }}-vpc-${{ env.STAGE }}) | ${VPC_ID} |"
+            TAGGED_ARNS=$(aws resourcegroupstaggingapi get-resources \
+              --tag-filters "Key=ManagedBy,Values=k6env-load-test-ec2" \
+              --query "ResourceTagMappingList[].ResourceARN" --output text)
 
-            EIP=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-eip-${{ env.STAGE }}" --query "Addresses[0].PublicIp" --output text)
-            echo "| Elastic IP | ${EIP} |"
+            if [ -z "${TAGGED_ARNS}" ]; then
+              echo "_タグ付きリソースは見つかりませんでした（未デプロイ、または既に削除済み）_"
+            else
+              echo "| ARN |"
+              echo "|---|"
+              for arn in ${TAGGED_ARNS}; do
+                echo "| \`${arn}\` |"
+              done
+            fi
 
+            # Resource Groups Tagging API はリソースの「タグ」を検索するため、タグを
+            # 付けられないサブリソース（S3 BucketPolicy/CORS/Lifecycle設定、Route、
+            # RouteTableAssociation等）はここには出てこない。それらは上記の親リソース
+            # （S3バケット・RouteTable等）と一緒に削除される付随設定として扱う。
+
+            echo ""
             RUNNING=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${{ env.RESOURCE_PREFIX }}-instance-${{ env.STAGE }}" "Name=instance-state-name,Values=pending,running" --query "length(Reservations[].Instances[])" --output text)
-            echo "| 実行中インスタンス | ${RUNNING}台 |"
-
-            LT_ID=$(aws ec2 describe-launch-templates --launch-template-names "${{ env.LAUNCH_TEMPLATE_NAME }}" --query "LaunchTemplates[0].LaunchTemplateId" --output text 2>/dev/null || echo "None")
-            echo "| Launch Template (${{ env.LAUNCH_TEMPLATE_NAME }}) | ${LT_ID} |"
-
-            BUCKET_EXISTS=$(aws s3api head-bucket --bucket "${{ env.BUCKET_NAME }}" 2>/dev/null && echo "exists" || echo "None")
             RESULT_COUNT=$(aws s3 ls "s3://${{ env.BUCKET_NAME }}/results/" --recursive 2>/dev/null | wc -l | tr -d ' ')
-            echo "| S3 Bucket (${{ env.BUCKET_NAME }}) | ${BUCKET_EXISTS}（results: ${RESULT_COUNT}件） |"
-
-            ROLE_EXISTS=$(aws iam get-role --role-name "${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}" --query "Role.RoleName" --output text 2>/dev/null || echo "None")
-            echo "| IAM Role (${{ env.RESOURCE_PREFIX }}-instance-role-${{ env.STAGE }}) | ${ROLE_EXISTS} |"
+            echo "- 実行中インスタンス: ${RUNNING}台"
+            echo "- S3 results/ 内のオブジェクト数: ${RESULT_COUNT}件"
 
             echo ""
             echo "⚠️ 上記が \`sst remove\` で削除される。問題なければ Actions画面の **Review deployments** から承認する（\`load-test-ec2-remove\` environmentがRequired reviewer必須）。"
@@ -129,7 +144,8 @@ jobs:
           # 「Review deployments」ボタンの方を先に見つけてSummaryを見ないまま
           # 承認してしまうケースがある。::warning::アノテーションはrunページの
           # 上部（ワークフロー図の近く）に必ず表示されるため、見落とし防止に使う。
-          echo "::warning title=削除対象の確認::VPC(${VPC_ID}) / EIP(${EIP}) / 実行中インスタンス${RUNNING}台 / LaunchTemplate(${LT_ID}) / S3(${BUCKET_EXISTS}, results ${RESULT_COUNT}件) / IAMRole(${ROLE_EXISTS}) が削除対象です。詳細な一覧はこのrunの下部Summaryを確認してから承認してください。"
+          ARN_COUNT=$(echo "${TAGGED_ARNS}" | tr '\t' '\n' | grep -c . || true)
+          echo "::warning title=削除対象の確認::タグ付きリソース ${ARN_COUNT}件（実行中インスタンス${RUNNING}台 / S3 results ${RESULT_COUNT}件を含む）が削除対象です。詳細な一覧はこのrunの下部Summaryを確認してから承認してください。"
 
   infra-deploy:
     if: inputs.infra_action == 'deploy'

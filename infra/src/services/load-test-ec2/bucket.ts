@@ -36,6 +36,7 @@ export const createLoadTestEc2Bucket = (
         bucket: {
           bucket: bucketName,
           forceDestroy: true,
+          tags: { Name: bucketName, ManagedBy: "k6env-load-test-ec2" },
           serverSideEncryptionConfiguration: {
             rule: {
               applyServerSideEncryptionByDefault: {

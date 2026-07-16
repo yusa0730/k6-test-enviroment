@@ -94,7 +94,7 @@ export const createLoadTestEc2InstanceRole = (
           }),
         },
       ],
-      tags: { Name: `${idPrefix}-role-${stage}` },
+      tags: { Name: `${idPrefix}-role-${stage}`, ManagedBy: "k6env-load-test-ec2" },
     });
 
     const instanceProfile = new aws.iam.InstanceProfile(
@@ -102,6 +102,7 @@ export const createLoadTestEc2InstanceRole = (
       {
         name: `${idPrefix}-profile-${stage}`,
         role: role.name,
+        tags: { Name: `${idPrefix}-profile-${stage}`, ManagedBy: "k6env-load-test-ec2" },
       },
     );
 
