@@ -125,6 +125,12 @@ jobs:
             echo "不要になった場合は \`aws ssm delete-parameter\` で別途消すこと。"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Step Summaryはrunページを下までスクロールしないと気づきにくく、
+          # 「Review deployments」ボタンの方を先に見つけてSummaryを見ないまま
+          # 承認してしまうケースがある。::warning::アノテーションはrunページの
+          # 上部（ワークフロー図の近く）に必ず表示されるため、見落とし防止に使う。
+          echo "::warning title=削除対象の確認::VPC(${VPC_ID}) / EIP(${EIP}) / 実行中インスタンス${RUNNING}台 / LaunchTemplate(${LT_ID}) / S3(${BUCKET_EXISTS}, results ${RESULT_COUNT}件) / IAMRole(${ROLE_EXISTS}) が削除対象です。詳細な一覧はこのrunの下部Summaryを確認してから承認してください。"
+
   infra-deploy:
     if: inputs.infra_action == 'deploy'
     runs-on: ubuntu-latest
